@@ -254,14 +254,132 @@ Then run any `agentmux` command — the daemon will auto-start fresh.
 
 ---
 
-## Development
+## AI Agent Setup Guide
+
+When an AI coding agent (Claude Code, Codex, Aider, etc.) needs to set up and build AgentMux in a fresh environment, follow these exact steps.
+
+### Prerequisites
+
+The environment must have:
+
+- **Rust toolchain** (stable, ≥ 1.70): `rustup show` or `rustc --version`
+- **Cargo**: comes with Rust
+- **Git**
+- **Linux or macOS** (Windows unsupported)
+
+If Rust is missing, install it:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/ther12k/agentmux.git
+cd agentmux
+cargo build --release
+```
+
+The binary will be at `target/release/agentmux`.
+
+### Install to PATH
+
+```bash
+mkdir -p ~/.local/bin
+cp target/release/agentmux ~/.local/bin/agentmux
+export PATH="$HOME/.local/bin:$PATH"
+# Add to shell profile for persistence:
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+```
+
+### Verify the install
+
+```bash
+agentmux version
+agentmux doctor
+```
+
+`doctor` checks:
+- Rust/Cargo availability
+- Socket path writability
+- TTY availability
+- PID file state
+
+### Quick functional test
+
+```bash
+# Spawn a shell session
+agentmux run shell --name test-session
+
+# List sessions
+agentmux list
+
+# Check session output
+agentmux logs test-session --tail 20
+
+# Stop the session
+agentmux stop test-session
+```
+
+### Development workflow
 
 ```bash
 cargo fmt
-cargo clippy --all-targets
+cargo clippy --all-targets -- -D warnings
 cargo test
-cargo build
+cargo build --release
 ```
+
+All four must pass before committing. The project has 98 tests.
+
+### Project structure for agents
+
+```
+src/
+├── main.rs              # Entry point
+├── cli.rs               # All clap commands and dispatch
+├── config.rs            # Config loading, merge, validation
+├── profiles.rs          # 7 built-in agent profiles
+├── autostart.rs         # Daemon auto-fork on first command
+├── doctor.rs            # Environment diagnostics
+├── workspace.rs         # Batch workspace start/status/restart
+├── tui.rs               # Ratatui terminal UI
+├── daemon/
+│   ├── server.rs        # Unix socket server, request dispatch
+│   ├── protocol.rs      # Request/Response JSON enums
+│   ├── session.rs       # SessionRegistry, PTY management
+│   └── state.rs         # Socket/PID path helpers
+├── pty/
+│   ├── mod.rs           # Foreground PTY spawn (experimental)
+│   └── attach.rs        # Attach/detach coordination
+└── storage/
+    └── logs.rs          # Rotating log writer (10MB, 3 files)
+```
+
+### Key conventions for agents editing this codebase
+
+1. **Never use `unwrap()` on user-facing paths** — use `?` or `let Some(x) else { ... }`.
+2. **Tests must not touch real `~/.local/share/agentmux`** — use `AGENTMUX_DATA_DIR=/tmp/...` or `tempfile::TempDir`.
+3. **`reset --all` must never delete logs or kill processes.**
+4. **Socket protocol is newline-delimited JSON** (not length-prefixed).
+5. **One attached client per session** — enforced by `AtomicBool`.
+6. **All gates must pass before commit:** `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test && cargo build --release`.
+
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `AGENTMUX_DATA_DIR` | Override data directory (for tests/isolation) |
+| `AGENTMUX_SOCKET_PATH` | Override Unix socket path |
+
+### If an agent gets stuck
+
+- **Build fails:** Check Rust version (`rustc --version` ≥ 1.70), run `cargo clean && cargo build`.
+- **Tests fail on socket/PID:** Ensure tests use `AGENTMUX_DATA_DIR` with a temp dir, not real state.
+- **Attach hangs in CI/container:** Expected — attach needs a real TTY. Use `scripts/manual-tty-test.sh` on a real terminal.
+- **`agentmux` command not found:** Check `~/.local/bin` is in `$PATH`.
 
 ---
 

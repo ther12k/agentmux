@@ -2,14 +2,64 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## First-Time Setup (for AI Agents)
+
+If you are an AI agent (Claude Code, Codex, Aider, etc.) working in this repo for the first time:
+
+### 1. Check prerequisites
+
+```bash
+rustc --version   # Must be ≥ 1.70
+cargo --version
+git --version
+```
+
+If Rust is missing:
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+```
+
+### 2. Build
+
+```bash
+cargo build --release
+```
+
+Binary: `target/release/agentmux`
+
+### 3. Install to PATH
+
+```bash
+mkdir -p ~/.local/bin
+cp target/release/agentmux ~/.local/bin/agentmux
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### 4. Verify
+
+```bash
+agentmux version
+agentmux doctor
+```
+
+### 5. Functional smoke test
+
+```bash
+agentmux run shell --name test-session
+agentmux list
+agentmux logs test-session --tail 20
+agentmux stop test-session
+```
+
 ## Common Development Commands
 
 ```bash
 # Format code
 cargo fmt
 
-# Check linting (run on all targets)
-cargo clippy --all-targets
+# Check linting (run on all targets, warnings are errors)
+cargo clippy --all-targets -- -D warnings
 
 # Run tests
 cargo test
