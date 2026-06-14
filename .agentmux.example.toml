@@ -1,0 +1,45 @@
+# AgentMux — Example Project Config
+#
+# Place this file as .agentmux.toml in your project root.
+# Project config overrides global config (~/.config/agentmux/config.toml).
+
+# --- Agent Profiles ---
+# Override built-in profiles or add custom ones.
+
+[agents.shell]
+command = "bash"
+args = []
+
+[agents.pi]
+command = "pi"
+args = []
+
+[agents.codex]
+command = "codex"
+args = []
+
+# Add a custom agent:
+# [agents.my-tool]
+# command = "my-tool"
+# args = ["--flag", "value"]
+
+# --- Workspace Sessions ---
+# Used by `agentmux workspace start` to batch-spawn sessions.
+
+[workspace]
+name = "my-project"
+
+[[workspace.sessions]]
+name = "shell-main"
+profile = "shell"
+cwd = "."
+
+[[workspace.sessions]]
+name = "pi-dev"
+profile = "pi"
+cwd = "."
+
+[[workspace.sessions]]
+name = "codex-ui"
+profile = "codex"
+cwd = "."

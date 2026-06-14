@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(recall *)",
+      "Skill(update-config)"
+    ]
+  }
+}

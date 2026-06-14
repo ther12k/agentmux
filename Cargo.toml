@@ -1,0 +1,35 @@
+[package]
+name = "agentmux"
+version = "0.1.0-alpha"
+edition = "2021"
+description = "Lightweight Rust terminal session manager for running multiple AI coding agents in parallel"
+
+[lib]
+name = "agentmux"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agentmux"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+directories = "5"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+portable-pty = "0.9"
+nix = { version = "0.29", features = ["term", "process", "signal"] }
+libc = "0.2"
+signal-hook = "0.3"
+which = "6"
+ratatui = "0.27"
+crossterm = "0.27"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+tempfile = "3"

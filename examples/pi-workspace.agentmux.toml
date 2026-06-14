@@ -1,0 +1,42 @@
+[workspace]
+name = "agentmux-dev"
+
+[agents.pi]
+command = "pi"
+args = []
+
+[agents.codex]
+command = "codex"
+args = []
+
+[agents.gemini]
+command = "gemini"
+args = []
+
+[agents.glm]
+command = "glm"
+args = []
+
+[agents.shell]
+command = "bash"
+args = []
+
+[[workspace.sessions]]
+name = "pi-main"
+profile = "pi"
+cwd = "."
+
+[[workspace.sessions]]
+name = "codex-ui"
+profile = "codex"
+cwd = "."
+
+[[workspace.sessions]]
+name = "glm-review"
+profile = "glm"
+cwd = "."
+
+[[workspace.sessions]]
+name = "shell"
+profile = "shell"
+cwd = "."
