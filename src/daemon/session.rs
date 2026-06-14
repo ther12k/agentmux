@@ -71,6 +71,7 @@ pub enum SessionStatus {
     Detached,
     Exited,
     Failed,
+    Orphaned,
 }
 
 impl std::fmt::Display for SessionStatus {
@@ -81,6 +82,7 @@ impl std::fmt::Display for SessionStatus {
             SessionStatus::Detached => write!(f, "detached"),
             SessionStatus::Exited => write!(f, "exited"),
             SessionStatus::Failed => write!(f, "failed"),
+            SessionStatus::Orphaned => write!(f, "orphaned"),
         }
     }
 }
@@ -357,8 +359,10 @@ impl SessionRegistry {
     }
 
     /// Reap any children that have exited and update session state.
-    pub fn reap(&mut self) {
+    /// Returns true if any session was reaped (for metadata persistence).
+    pub fn reap(&mut self) -> bool {
         let names: Vec<String> = self.handles.keys().cloned().collect();
+        let mut any_reaped = false;
         for name in names {
             let exit_code = {
                 let Some(handle) = self.handles.get_mut(&name) else {
@@ -375,8 +379,10 @@ impl SessionRegistry {
                 info!("Session '{}' exited with code={}", name, code);
                 self.handles.remove(&name);
                 self.update(&name, Some(SessionStatus::Exited), Some(code), None);
+                any_reaped = true;
             }
         }
+        any_reaped
     }
 
     /// Check if a session handle is alive (has a running child).

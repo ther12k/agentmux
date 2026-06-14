@@ -13,6 +13,9 @@ pub enum Request {
     /// Request daemon shutdown.
     Shutdown,
 
+    /// Query daemon status (pid, uptime, session count).
+    DaemonStatus,
+
     /// Create/register a session entry in daemon registry (no spawn).
     AddSession {
         name: String,

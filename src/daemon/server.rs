@@ -3,10 +3,12 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tracing::{debug, error, info, warn};
 
+use super::metadata;
 use super::protocol::{Request, Response};
 use super::session::{Session, SessionRegistry, SessionStatus};
 use super::state;
@@ -14,9 +16,13 @@ use super::state;
 /// Type alias for the shared registry.
 type SharedRegistry = Arc<Mutex<SessionRegistry>>;
 
+/// Default timeout for graceful shutdown (seconds).
+const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
+
 /// Start the daemon: open socket, spawn reaper thread, handle connections.
 ///
 /// Architecture:
+///   - Startup: load sessions.json for recovery
 ///   - Main thread: accept loop, spawns a thread per connection
 ///   - Reaper thread: periodically locks registry and reaps exited children
 ///   - Per-connection thread: handles request/response, or raw attach forwarding
@@ -47,27 +53,58 @@ pub fn run() -> Result<()> {
 
     let registry: SharedRegistry = Arc::new(Mutex::new(SessionRegistry::new()));
 
+    // Recover sessions from sessions.json
+    recover_from_metadata(&registry);
+
+    // Track daemon start time for uptime.
+    let start_time = Instant::now();
+
     // Dedicated reaper thread: locks registry directly every 500ms.
+    // Also persists metadata periodically.
     {
         let registry = Arc::clone(&registry);
         thread::spawn(move || loop {
-            thread::sleep(std::time::Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(500));
             if let Ok(mut reg) = registry.lock() {
-                reg.reap();
+                let changed = reg.reap();
+                if changed {
+                    drop(reg);
+                    if let Ok(reg) = registry.lock() {
+                        let _ = metadata::save_metadata(&reg);
+                    }
+                }
             }
         });
     }
 
+    // Use a timeout on accept so we can check a shutdown flag.
+    listener.set_nonblocking(true)?;
+
+    let shutting_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Accept loop: spawn a thread per connection.
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    loop {
+        // Check if shutdown was requested.
+        if shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // Reset to blocking for the connection handler.
+                stream.set_nonblocking(false)?;
                 let registry = Arc::clone(&registry);
+                let shutting_down = Arc::clone(&shutting_down);
                 thread::spawn(move || {
-                    if let Err(e) = handle_connection(stream, &registry) {
+                    if let Err(e) = handle_connection(stream, &registry, &shutting_down, start_time)
+                    {
                         error!("Connection error: {}", e);
                     }
                 });
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No connection ready, brief sleep and retry.
+                thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
                 error!("Accept error: {}", e);
@@ -75,13 +112,148 @@ pub fn run() -> Result<()> {
         }
     }
 
+    // Graceful shutdown: cleanup already done by do_shutdown.
+    info!("Daemon accept loop exited");
     Ok(())
+}
+
+/// Recover sessions from sessions.json on startup.
+fn recover_from_metadata(registry: &SharedRegistry) {
+    match metadata::recover_sessions() {
+        Ok(recovered) => {
+            if recovered.is_empty() {
+                return;
+            }
+            info!("Recovering {} session(s) from metadata", recovered.len());
+            if let Ok(mut reg) = registry.lock() {
+                for meta in recovered {
+                    let status = match meta.status.as_str() {
+                        "orphaned" => SessionStatus::Orphaned,
+                        "exited" => SessionStatus::Exited,
+                        "running" => SessionStatus::Orphaned,
+                        _ => SessionStatus::Exited,
+                    };
+                    let session = Session {
+                        id: meta.id,
+                        name: meta.name.clone(),
+                        profile: meta.profile,
+                        command: meta.command,
+                        args: meta.args,
+                        cwd: meta.cwd,
+                        pid: meta.pid,
+                        created_at: meta.created_at,
+                        updated_at: meta.updated_at,
+                        status,
+                        exit_code: meta.exit_code,
+                        log_path: meta.log_path.map(std::path::PathBuf::from),
+                    };
+                    if let Err(e) = reg.add(session) {
+                        warn!("Failed to recover session '{}': {}", meta.name, e);
+                    }
+                }
+            }
+            // Persist the updated statuses.
+            if let Ok(reg) = registry.lock() {
+                let _ = metadata::save_metadata(&reg);
+            }
+        }
+        Err(e) => {
+            warn!("Failed to load session metadata: {}", e);
+        }
+    }
+}
+
+/// Perform graceful shutdown.
+/// 1. Detach all active clients
+/// 2. SIGTERM all child sessions
+/// 3. Wait up to timeout
+/// 4. SIGKILL remaining
+/// 5. Update statuses
+/// 6. Persist metadata
+/// 7. Remove socket + PID file
+fn do_shutdown(registry: &SharedRegistry) -> Response {
+    info!("Graceful shutdown initiated");
+
+    // SIGTERM all running sessions.
+    {
+        if let Ok(reg) = registry.lock() {
+            let names: Vec<String> = reg.list().iter().map(|s| s.name.clone()).collect();
+            drop(reg);
+            for name in names {
+                if let Ok(mut reg) = registry.lock() {
+                    if reg.is_alive(&name) {
+                        let _ = reg.signal(&name, false); // SIGTERM
+                        debug!("SIGTERM sent to '{}'", name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Wait up to DEFAULT_SHUTDOWN_TIMEOUT_SECS for children to exit.
+    let deadline = Instant::now() + Duration::from_secs(DEFAULT_SHUTDOWN_TIMEOUT_SECS);
+    loop {
+        thread::sleep(Duration::from_millis(200));
+        if let Ok(mut reg) = registry.lock() {
+            reg.reap();
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        // Check if all done.
+        if let Ok(reg) = registry.lock() {
+            let any_alive = reg.list().iter().any(|s| {
+                matches!(
+                    s.status,
+                    SessionStatus::Running | SessionStatus::Attached | SessionStatus::Detached
+                )
+            });
+            if !any_alive {
+                break;
+            }
+        }
+    }
+
+    // SIGKILL any remaining.
+    {
+        if let Ok(reg) = registry.lock() {
+            let names: Vec<String> = reg.list().iter().map(|s| s.name.clone()).collect();
+            drop(reg);
+            for name in names {
+                if let Ok(mut reg) = registry.lock() {
+                    if reg.is_alive(&name) {
+                        let _ = reg.signal(&name, true); // SIGKILL
+                        debug!("SIGKILL sent to '{}'", name);
+                    }
+                    // Mark as exited.
+                    reg.update(&name, Some(SessionStatus::Exited), Some(-1), None);
+                }
+            }
+        }
+    }
+
+    // Persist metadata.
+    if let Ok(reg) = registry.lock() {
+        let _ = metadata::save_metadata(&reg);
+    }
+
+    // Remove socket and PID file.
+    let _ = state::remove_stale_socket();
+    state::remove_pid_file();
+
+    info!("Shutdown complete");
+    Response::ok(serde_json::json!({"status": "shutting down"}))
 }
 
 /// Handle a single client connection.
 /// For most requests: read one JSON line, respond with one JSON line.
 /// For AttachSession: after responding, switch to raw byte forwarding.
-fn handle_connection(stream: UnixStream, registry: &SharedRegistry) -> Result<()> {
+fn handle_connection(
+    stream: UnixStream,
+    registry: &SharedRegistry,
+    shutting_down: &Arc<std::sync::atomic::AtomicBool>,
+    start_time: Instant,
+) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
@@ -115,7 +287,18 @@ fn handle_connection(stream: UnixStream, registry: &SharedRegistry) -> Result<()
         return Ok(());
     }
 
-    let response = handle_request(request, registry)?;
+    // Handle Shutdown specially — sets flag and does graceful cleanup.
+    if matches!(request, Request::Shutdown) {
+        let resp = do_shutdown(registry);
+        let json = serde_json::to_string(&resp)?;
+        writer.write_all(format!("{}\n", json).as_bytes())?;
+        // Signal the accept loop to stop.
+        shutting_down.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Exit the daemon process.
+        std::process::exit(0);
+    }
+
+    let response = handle_request(request, registry, start_time)?;
 
     let json = serde_json::to_string(&response)?;
     writer.write_all(format!("{}\n", json).as_bytes())?;
@@ -128,15 +311,6 @@ fn handle_connection(stream: UnixStream, registry: &SharedRegistry) -> Result<()
 /// 2. Send OK response
 /// 3. Spawn threads to bridge socket↔subscriber and socket→PTY writer
 /// 4. On client disconnect (Ctrl-b d) or PTY exit, clean up and return
-///
-/// Uses a channel so the handler returns when EITHER thread exits:
-///   - If the client disconnects (Ctrl-b d → socket EOF on read side),
-///     socket_to_pty exits and we shut down the subscriber forwarding.
-///   - If the PTY reader exits (child process exits → subscriber channel closes),
-///     pty_to_socket exits and we shut down the socket forwarding.
-///
-/// This prevents the handler from hanging when the child process exits while
-/// the client is still connected.
 fn handle_attach(mut stream: UnixStream, name: &str, registry: &SharedRegistry) -> Result<()> {
     // Try to attach.
     let (subscriber_rx, pty_writer) = {
@@ -144,7 +318,27 @@ fn handle_attach(mut stream: UnixStream, name: &str, registry: &SharedRegistry) 
             .lock()
             .map_err(|_| anyhow::anyhow!("Registry lock poisoned"))?;
 
-        // Check the session is alive.
+        // Check the session exists.
+        if !reg.exists(name) {
+            let resp = Response::error(&format!("Session '{}' not found", name));
+            let json = serde_json::to_string(&resp)?;
+            stream.write_all(format!("{}\n", json).as_bytes())?;
+            return Ok(());
+        }
+
+        // Check if orphaned.
+        if let Some(session) = reg.get(name) {
+            if matches!(session.status, SessionStatus::Orphaned) {
+                let resp = Response::error(
+                    "session is orphaned after daemon restart; restart it to attach again",
+                );
+                let json = serde_json::to_string(&resp)?;
+                stream.write_all(format!("{}\n", json).as_bytes())?;
+                return Ok(());
+            }
+        }
+
+        // Check the session is alive (has a PTY handle).
         if !reg.is_alive(name) {
             let resp = Response::error(&format!("Session '{}' not found or not running", name));
             let json = serde_json::to_string(&resp)?;
@@ -177,13 +371,9 @@ fn handle_attach(mut stream: UnixStream, name: &str, registry: &SharedRegistry) 
     stream.flush()?;
 
     // Now switch to raw byte forwarding mode.
-    // After the response line, all data is raw bytes.
-
     let write_stream = stream.try_clone()?;
-    // Keep a reference for shutdown after one thread exits.
     let shutdown_stream = stream.try_clone()?;
 
-    // Channel: either forwarding thread signals when it exits.
     let (exit_tx, exit_rx) = mpsc::channel::<()>();
     let exit_tx_pty = exit_tx.clone();
     let exit_tx_sock = exit_tx.clone();
@@ -192,7 +382,6 @@ fn handle_attach(mut stream: UnixStream, name: &str, registry: &SharedRegistry) 
     // Thread: subscriber → socket (PTY output to client)
     let pty_to_socket_thread = thread::spawn(move || {
         let mut stream = write_stream;
-        // Drain subscriber channel and forward to socket.
         loop {
             match subscriber_rx.recv() {
                 Ok(data) => {
@@ -202,7 +391,6 @@ fn handle_attach(mut stream: UnixStream, name: &str, registry: &SharedRegistry) 
                     let _ = stream.flush();
                 }
                 Err(mpsc::RecvError) => {
-                    // Reader thread dropped the sender or session exited.
                     debug!("Subscriber channel closed (session may have exited)");
                     break;
                 }
@@ -221,7 +409,6 @@ fn handle_attach(mut stream: UnixStream, name: &str, registry: &SharedRegistry) 
             match stream_reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    // Write to PTY via shared writer.
                     let mut writer = match pty_writer.lock() {
                         Ok(w) => w,
                         Err(_) => break,
@@ -235,8 +422,6 @@ fn handle_attach(mut stream: UnixStream, name: &str, registry: &SharedRegistry) 
             }
         }
 
-        // Clean up: detach and update status.
-        // This runs when the client disconnects (Ctrl-b d closes the socket).
         if let Ok(reg) = registry_for_cleanup.lock() {
             reg.detach(&name_owned);
         }
@@ -249,21 +434,12 @@ fn handle_attach(mut stream: UnixStream, name: &str, registry: &SharedRegistry) 
         let _ = exit_tx_sock.send(());
     });
 
-    // Wait for either forwarding thread to exit.
-    // This is the critical fix: we do NOT join socket_to_pty first.
-    // If the PTY reader exits (child process done), pty_to_socket detects
-    // subscriber channel disconnect and exits — we wake immediately.
     let _ = exit_rx.recv();
-
-    // One side exited — shut down the socket to unblock the other thread.
     let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
-
-    // Best-effort joins: both threads should exit promptly once the socket
-    // is shut down.
     let _ = pty_to_socket_thread.join();
     let _ = socket_to_pty_thread.join();
 
-    // Final cleanup: ensure session is not left in "attached" state.
+    // Final cleanup.
     if let Ok(reg) = registry.lock() {
         reg.detach(name);
     }
@@ -276,12 +452,35 @@ fn handle_attach(mut stream: UnixStream, name: &str, registry: &SharedRegistry) 
     Ok(())
 }
 
-fn handle_request(request: Request, registry: &SharedRegistry) -> Result<Response> {
+fn handle_request(
+    request: Request,
+    registry: &SharedRegistry,
+    start_time: Instant,
+) -> Result<Response> {
     Ok(match request {
         Request::Ping => Response::ok(serde_json::json!("pong")),
 
+        Request::DaemonStatus => {
+            let pid = std::process::id();
+            let uptime = start_time.elapsed().as_secs();
+            let session_count = {
+                let reg = registry
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Registry lock poisoned"))?;
+                reg.list().len()
+            };
+            let sock_path = state::socket_path()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            Response::ok(serde_json::json!({
+                "pid": pid,
+                "uptime_seconds": uptime,
+                "session_count": session_count,
+                "socket_path": sock_path,
+            }))
+        }
+
         Request::ListSessions => {
-            // Reap before listing so statuses are fresh.
             let sessions = {
                 let mut reg = registry
                     .lock()
@@ -304,7 +503,10 @@ fn handle_request(request: Request, registry: &SharedRegistry) -> Result<Respons
                 .map_err(|_| anyhow::anyhow!("Registry lock poisoned"))?;
             match Session::new(&name, &profile, &command, args, cwd) {
                 Ok(session) => match reg.add(session) {
-                    Ok(_) => Response::ok(serde_json::json!({ "status": "created" })),
+                    Ok(_) => {
+                        let _ = metadata::save_metadata(&reg);
+                        Response::ok(serde_json::json!({ "status": "created" }))
+                    }
                     Err(e) => Response::error(&e.to_string()),
                 },
                 Err(e) => Response::error(&e.to_string()),
@@ -316,6 +518,7 @@ fn handle_request(request: Request, registry: &SharedRegistry) -> Result<Respons
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Registry lock poisoned"))?;
             reg.remove(&name);
+            let _ = metadata::save_metadata(&reg);
             Response::ok(serde_json::json!({ "status": "removed" }))
         }
 
@@ -337,12 +540,16 @@ fn handle_request(request: Request, registry: &SharedRegistry) -> Result<Respons
             }
 
             match reg.spawn(&name, &command, args, cwd) {
-                Ok(pid) => Response::ok(serde_json::json!({
-                    "status": "spawned",
-                    "pid": pid,
-                })),
+                Ok(pid) => {
+                    let _ = metadata::save_metadata(&reg);
+                    Response::ok(serde_json::json!({
+                        "status": "spawned",
+                        "pid": pid,
+                    }))
+                }
                 Err(e) => {
                     reg.update(&name, Some(SessionStatus::Failed), None, None);
+                    let _ = metadata::save_metadata(&reg);
                     Response::error(&e.to_string())
                 }
             }
@@ -352,8 +559,26 @@ fn handle_request(request: Request, registry: &SharedRegistry) -> Result<Respons
             let mut reg = registry
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Registry lock poisoned"))?;
+
+            // Handle orphaned sessions: try to kill PID.
+            if let Some(session) = reg.get(&name).cloned() {
+                if matches!(session.status, SessionStatus::Orphaned) {
+                    if let Some(pid) = session.pid {
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGTERM);
+                        }
+                    }
+                    reg.update(&name, Some(SessionStatus::Exited), None, None);
+                    let _ = metadata::save_metadata(&reg);
+                    return Ok(Response::ok(serde_json::json!({ "status": "stopped" })));
+                }
+            }
+
             match reg.signal(&name, false) {
-                Ok(_) => Response::ok(serde_json::json!({ "status": "stopped" })),
+                Ok(_) => {
+                    let _ = metadata::save_metadata(&reg);
+                    Response::ok(serde_json::json!({ "status": "stopped" }))
+                }
                 Err(e) => Response::error(&e.to_string()),
             }
         }
@@ -362,8 +587,26 @@ fn handle_request(request: Request, registry: &SharedRegistry) -> Result<Respons
             let mut reg = registry
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Registry lock poisoned"))?;
+
+            // Handle orphaned sessions: try to kill PID.
+            if let Some(session) = reg.get(&name).cloned() {
+                if matches!(session.status, SessionStatus::Orphaned) {
+                    if let Some(pid) = session.pid {
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGKILL);
+                        }
+                    }
+                    reg.remove(&name);
+                    let _ = metadata::save_metadata(&reg);
+                    return Ok(Response::ok(serde_json::json!({ "status": "killed" })));
+                }
+            }
+
             match reg.signal(&name, true) {
-                Ok(_) => Response::ok(serde_json::json!({ "status": "killed" })),
+                Ok(_) => {
+                    let _ = metadata::save_metadata(&reg);
+                    Response::ok(serde_json::json!({ "status": "killed" }))
+                }
                 Err(e) => Response::error(&e.to_string()),
             }
         }
@@ -372,6 +615,14 @@ fn handle_request(request: Request, registry: &SharedRegistry) -> Result<Respons
             let reg = registry
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Registry lock poisoned"))?;
+
+            // Check orphaned.
+            if let Some(session) = reg.get(&name) {
+                if matches!(session.status, SessionStatus::Orphaned) {
+                    return Ok(Response::error("session is orphaned; restart it to attach"));
+                }
+            }
+
             match reg.resize(&name, rows, cols) {
                 Ok(_) => Response::ok(serde_json::json!({ "status": "resized" })),
                 Err(e) => Response::error(&e.to_string()),
@@ -382,6 +633,14 @@ fn handle_request(request: Request, registry: &SharedRegistry) -> Result<Respons
             let reg = registry
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Registry lock poisoned"))?;
+
+            // Check orphaned.
+            if let Some(session) = reg.get(&name) {
+                if matches!(session.status, SessionStatus::Orphaned) {
+                    return Ok(Response::error("session is orphaned; restart it first"));
+                }
+            }
+
             match reg.write_input(&name, &data) {
                 Ok(_) => Response::ok(serde_json::json!({ "status": "sent" })),
                 Err(e) => Response::error(&e.to_string()),
@@ -393,7 +652,6 @@ fn handle_request(request: Request, registry: &SharedRegistry) -> Result<Respons
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Registry lock poisoned"))?;
 
-            // Get session metadata before stopping.
             let session = match reg.get(&name) {
                 Some(s) => s.clone(),
                 None => return Ok(Response::error(&format!("Session '{}' not found", name))),
@@ -408,29 +666,42 @@ fn handle_request(request: Request, registry: &SharedRegistry) -> Result<Respons
                     .and_then(|mut f| std::io::Write::write_all(&mut f, marker.as_bytes()));
             }
 
-            // Stop if alive.
-            if reg.is_alive(&name) {
-                let _ = reg.signal(&name, false); // SIGTERM
-            }
-
-            // Wait up to 3 seconds for graceful exit.
-            for _ in 0..30 {
-                reg.reap();
-                if !reg.is_alive(&name) {
-                    break;
+            // For orphaned sessions: kill old PID if alive.
+            // For regular sessions: stop, wait, force kill.
+            if matches!(session.status, SessionStatus::Orphaned) {
+                if let Some(pid) = session.pid {
+                    if state::is_pid_alive(pid) {
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGKILL);
+                        }
+                        thread::sleep(Duration::from_millis(200));
+                    }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+                reg.remove(&name);
+            } else {
+                // Stop if alive.
+                if reg.is_alive(&name) {
+                    let _ = reg.signal(&name, false); // SIGTERM
+                }
 
-            // Force kill if still alive.
-            if reg.is_alive(&name) {
-                let _ = reg.signal(&name, true);
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                reg.reap();
-            }
+                // Wait up to 3 seconds for graceful exit.
+                for _ in 0..30 {
+                    reg.reap();
+                    if !reg.is_alive(&name) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
 
-            // Remove old session entry.
-            reg.remove(&name);
+                // Force kill if still alive.
+                if reg.is_alive(&name) {
+                    let _ = reg.signal(&name, true);
+                    thread::sleep(Duration::from_millis(200));
+                    reg.reap();
+                }
+
+                reg.remove(&name);
+            }
 
             // Create new session with same metadata and spawn.
             let new_session = Session::new(
@@ -448,22 +719,24 @@ fn handle_request(request: Request, registry: &SharedRegistry) -> Result<Respons
                 session.args.clone(),
                 session.cwd.clone(),
             ) {
-                Ok(pid) => Response::ok(serde_json::json!({ "status": "restarted", "pid": pid })),
-                Err(e) => Response::error(&e.to_string()),
+                Ok(pid) => {
+                    let _ = metadata::save_metadata(&reg);
+                    Response::ok(serde_json::json!({ "status": "restarted", "pid": pid }))
+                }
+                Err(e) => {
+                    let _ = metadata::save_metadata(&reg);
+                    Response::error(&e.to_string())
+                }
             }
         }
 
         Request::AttachSession { .. } | Request::DetachSession { .. } => {
-            // These are handled in handle_connection before reaching here.
             Response::error("Attach/Detach should not reach handle_request")
         }
 
         Request::Shutdown => {
-            info!("Shutdown requested");
-            state::remove_pid_file();
-            let sock_path = state::socket_path()?;
-            let _ = std::fs::remove_file(&sock_path);
-            std::process::exit(0);
+            // This is handled in handle_connection before reaching here.
+            Response::error("Shutdown should not reach handle_request")
         }
     })
 }
@@ -508,7 +781,6 @@ pub fn send_resize(name: &str, rows: u16, cols: u16) -> Result<()> {
 
 /// Connect to the daemon for an attach session.
 /// Returns the connected stream (after reading the response line).
-/// The caller should switch to raw byte I/O on the stream after this.
 pub fn connect_attach(name: &str) -> Result<UnixStream> {
     let sock_path = state::socket_path()?;
 
