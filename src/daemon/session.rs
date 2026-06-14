@@ -245,9 +245,20 @@ impl SessionRegistry {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        // Update the session with log_path.
+        // Update the session metadata for this fresh spawn. This matters when
+        // reusing an existing exited/failed session entry: the session must not
+        // remain shown as exited while a new child is running.
         if let Some(session) = self.sessions.get_mut(name) {
+            session.command = command.to_string();
+            session.args = args.clone();
+            session.cwd = cwd.clone();
+            session.pid = Some(pid);
+            session.status = SessionStatus::Detached;
+            session.exit_code = None;
             session.log_path = Some(log_path.clone());
+            if let Ok(now) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+                session.updated_at = now.as_secs();
+            }
         }
 
         // Subscriber slot — initially None (no client attached).
@@ -278,7 +289,6 @@ impl SessionRegistry {
         };
 
         self.handles.insert(name.to_string(), handle);
-        self.update(name, None, None, Some(pid));
 
         info!("Session '{}' spawned (pid={})", name, pid);
         Ok(pid)

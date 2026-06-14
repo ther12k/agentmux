@@ -214,7 +214,8 @@ fn do_shutdown(registry: &SharedRegistry) -> Response {
         }
     }
 
-    // SIGKILL any remaining.
+    // SIGKILL any remaining live children. Do not overwrite already-reaped
+    // sessions, because they may have a real exit code from the graceful wait.
     {
         if let Ok(reg) = registry.lock() {
             let names: Vec<String> = reg.list().iter().map(|s| s.name.clone()).collect();
@@ -224,9 +225,8 @@ fn do_shutdown(registry: &SharedRegistry) -> Response {
                     if reg.is_alive(&name) {
                         let _ = reg.signal(&name, true); // SIGKILL
                         debug!("SIGKILL sent to '{}'", name);
+                        reg.update(&name, Some(SessionStatus::Exited), Some(-1), None);
                     }
-                    // Mark as exited.
-                    reg.update(&name, Some(SessionStatus::Exited), Some(-1), None);
                 }
             }
         }
@@ -237,8 +237,14 @@ fn do_shutdown(registry: &SharedRegistry) -> Response {
         let _ = metadata::save_metadata(&reg);
     }
 
-    // Remove socket and PID file.
-    let _ = state::remove_stale_socket();
+    // Remove socket and PID file. We own the listener during shutdown, so do
+    // not call remove_stale_socket(): it intentionally refuses to remove a
+    // socket while the daemon is still responsive.
+    if let Ok(sock_path) = state::socket_path() {
+        if sock_path.exists() {
+            let _ = std::fs::remove_file(&sock_path);
+        }
+    }
     state::remove_pid_file();
 
     info!("Shutdown complete");
@@ -533,8 +539,25 @@ fn handle_request(
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Registry lock poisoned"))?;
 
-            // Auto-create the session entry if it doesn't exist yet.
-            if !reg.exists(&name) {
+            // Auto-create the session entry if it doesn't exist yet. If a
+            // previous exited/failed entry exists, allow respawn and refresh its
+            // metadata in SessionRegistry::spawn. Do not spawn over a live or
+            // orphaned session, because that can duplicate agents with one name.
+            if reg.exists(&name) {
+                if reg.is_alive(&name) {
+                    return Ok(Response::error(&format!(
+                        "Session '{}' is already running",
+                        name
+                    )));
+                }
+                if let Some(existing) = reg.get(&name) {
+                    if matches!(existing.status, SessionStatus::Orphaned) {
+                        return Ok(Response::error(
+                            "session is orphaned after daemon restart; restart it first",
+                        ));
+                    }
+                }
+            } else {
                 let session = Session::new(&name, &profile, &command, args.clone(), cwd.clone())?;
                 reg.add(session)?;
             }
@@ -596,7 +619,7 @@ fn handle_request(
                             libc::kill(pid as i32, libc::SIGKILL);
                         }
                     }
-                    reg.remove(&name);
+                    reg.update(&name, Some(SessionStatus::Exited), Some(-1), None);
                     let _ = metadata::save_metadata(&reg);
                     return Ok(Response::ok(serde_json::json!({ "status": "killed" })));
                 }
@@ -724,6 +747,7 @@ fn handle_request(
                     Response::ok(serde_json::json!({ "status": "restarted", "pid": pid }))
                 }
                 Err(e) => {
+                    reg.update(&name, Some(SessionStatus::Failed), None, None);
                     let _ = metadata::save_metadata(&reg);
                     Response::error(&e.to_string())
                 }

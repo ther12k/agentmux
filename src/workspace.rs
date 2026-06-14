@@ -28,8 +28,9 @@ pub fn start_workspace() -> Result<()> {
         return Ok(());
     }
 
-    // Fetch currently running sessions to check for duplicates.
-    let existing_sessions = fetch_session_names()?;
+    // Fetch healthy sessions to check for duplicates. Exited/failed entries
+    // should not be reported as "already running"; they can be respawned.
+    let existing_sessions = fetch_healthy_session_names()?;
 
     if let Some(name) = &workspace.name {
         println!("Workspace: {}\n", name);
@@ -142,12 +143,16 @@ pub fn start_workspace() -> Result<()> {
     Ok(())
 }
 
-/// Fetch the set of existing session names from the daemon.
-fn fetch_session_names() -> Result<Vec<String>> {
+/// Fetch the set of healthy session names from the daemon.
+fn fetch_healthy_session_names() -> Result<Vec<String>> {
     let resp = server::send_request(&Request::ListSessions)?;
     let mut names = Vec::new();
     if let Some(arr) = resp.data.as_array() {
         for s in arr {
+            let status = s.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if !matches!(status, "running" | "attached" | "detached") {
+                continue;
+            }
             if let Some(name) = s.get("name").and_then(|v| v.as_str()) {
                 names.push(name.to_string());
             }
@@ -471,11 +476,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fetch_session_names_returns_empty_when_no_daemon() {
-        // When no daemon is running, fetch_session_names returns an error.
+    fn fetch_healthy_session_names_returns_empty_when_no_daemon() {
+        // When no daemon is running, fetch_healthy_session_names returns an error.
         // We can't easily test the daemon path in unit tests, but we can
         // verify the function doesn't panic.
-        let result = fetch_session_names();
+        let result = fetch_healthy_session_names();
         let _ = result;
     }
 

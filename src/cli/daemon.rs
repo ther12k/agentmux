@@ -36,7 +36,10 @@ pub fn handle_status() -> Result<()> {
 
 /// Handle `agentmux daemon shutdown`
 pub fn handle_shutdown() -> Result<()> {
-    crate::daemon::autostart::ensure_daemon_running()?;
+    if !crate::daemon::state::is_daemon_running() {
+        println!("Daemon: not running");
+        return Ok(());
+    }
 
     let resp = crate::daemon::server::send_request(&Request::Shutdown)?;
     if resp.ok {
@@ -54,7 +57,13 @@ pub fn handle_shutdown() -> Result<()> {
 
 /// Handle `agentmux daemon status`
 pub fn handle_daemon_status() -> Result<()> {
-    crate::daemon::autostart::ensure_daemon_running()?;
+    if !crate::daemon::state::is_daemon_running() {
+        println!("Daemon:   not running");
+        if let Ok(socket_path) = crate::daemon::state::socket_path() {
+            println!("Socket:   {}", socket_path.display());
+        }
+        return Ok(());
+    }
 
     let resp = crate::daemon::server::send_request(&Request::DaemonStatus)?;
     if resp.ok {

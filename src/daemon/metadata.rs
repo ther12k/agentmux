@@ -2,7 +2,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static SAVE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use super::session::{Session, SessionRegistry};
 use super::state;
@@ -70,7 +73,12 @@ pub fn save_metadata(registry: &SessionRegistry) -> Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Cannot determine parent dir"))?;
-    let temp_path = dir.join(format!(".sessions.json.tmp.{}", std::process::id()));
+    let counter = SAVE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_path = dir.join(format!(
+        ".sessions.json.tmp.{}.{}",
+        std::process::id(),
+        counter
+    ));
 
     let mut file = std::fs::File::create(&temp_path)?;
     file.write_all(json.as_bytes())?;
