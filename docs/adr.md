@@ -264,3 +264,179 @@ Accept this as a **known limitation for v0.1**. Sessions are in-memory only.
 
 - v0.2+: Save session metadata to disk on spawn, reattach to PIDs after restart
 - Consider `systemd` socket activation for daemon auto-start
+
+---
+
+## ADR-009: Channel-based attach/detach exit coordination
+
+**Date:** 2026-06-14
+**Status:** Accepted
+
+### Context
+
+During attach, two threads run concurrently: stdin→socket (input) and socket→stdout (output). The original implementation joined the input thread first. If the PTY exited (output thread got EOF) while the input thread was blocked on `stdin.read()`, attach would hang until the user pressed a key.
+
+### Decision
+
+Use an `mpsc::channel<ExitSide>` for shutdown coordination. Both threads signal on exit. The main thread blocks on `exit_rx.recv()` — wakes when **either** thread exits.
+
+### Details
+
+- Input thread is **detached, not joined** — it may be blocked in `stdin.read()` which cannot be safely interrupted without platform-specific tricks (SIGUSR1 injection or non-blocking stdin).
+- After wake: set stop flag → `stream.shutdown(Both)` → `resize_handle.close()` → join output + resize threads.
+- Resize thread uses `signal_hook::iterator::Signals::forever()` — must call `Handle::close()` to wake the iterator and prevent hang.
+
+### Rationale
+
+- Channel wakes on whichever side finishes first — no hang on PTY exit.
+- Detaching the input thread avoids blocking the caller. Thread terminates naturally on next keypress or process exit.
+- Symmetric design: daemon-side `handle_attach` uses the same channel pattern.
+
+### Alternatives considered
+
+- **Join input thread first**: Hangs if PTY exits while stdin blocked.
+- **Non-blocking stdin (O_NONBLOCK)**: Platform-specific, fragile, breaks raw mode.
+- **SIGUSR1 to interrupt stdin.read()**: Race-prone, signal handler complexity.
+
+---
+
+## ADR-010: Single reader thread + subscriber fan-out
+
+**Date:** 2026-06-14
+**Status:** Accepted
+
+### Context
+
+Multiple attach clients could theoretically share a PTY reader. The initial design had per-attach reader threads, causing read conflicts and output stealing.
+
+### Decision
+
+**One** background reader thread per session owns the sole PTY reader. It fans out bytes to:
+1. The log file (always, via `RotatingLogWriter`)
+2. The current subscriber, if any (set on attach, cleared on detach)
+
+The PTY writer is shared via `Arc<Mutex<Box<dyn Write + Send>>>`.
+
+### Details
+
+- Subscriber slot: `Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>`
+- Only one attached client per session (enforced by `AtomicBool`)
+- On PTY EOF: reader thread clears subscriber → mpsc channel disconnects → daemon's `pty_to_socket` forwarding thread wakes → attach handler exits cleanly
+
+### Rationale
+
+- Single reader = no read conflicts, no byte duplication
+- Subscriber pattern decouples reader lifecycle from attach lifecycle
+- Clearing subscriber on EOF prevents zombie "attached" state
+
+### Alternatives considered
+
+- **Per-attach reader**: `try_clone_reader()` called per attach → multiple readers compete for PTY output.
+- **Broadcast channel (tokio::broadcast)**: Requires async runtime, overkill for single-client model.
+
+---
+
+## ADR-011: AGENTMUX_DATA_DIR env override for test isolation
+
+**Date:** 2026-06-14
+**Status:** Accepted
+
+### Context
+
+Tests that exercise socket path resolution, PID file I/O, and reset logic were touching the developer's real `~/.local/share/agentmux/` directory. This creates flaky tests (daemon might be running) and data loss risk (reset --all could delete real state).
+
+### Decision
+
+`socket_dir()` honors `AGENTMUX_DATA_DIR` environment variable. When set, all paths (socket, PID file, logs) resolve under the override directory instead of the default XDG data dir.
+
+### Test infrastructure
+
+- `tempfile::TempDir` creates isolated temp directories per test
+- `static ENV_LOCK: OnceLock<Mutex<()>>` serializes tests that mutate the env var (env vars are process-global)
+- Each test saves/restores the previous value
+
+### Rationale
+
+- Zero risk to real user state during testing
+- Tests run correctly in parallel (mutex serializes env-var access)
+- `AGENTMUX_DATA_DIR` also useful for users who want non-standard data locations
+
+---
+
+## ADR-012: PID file for daemon liveness diagnostics
+
+**Date:** 2026-06-14
+**Status:** Accepted
+
+### Context
+
+`agentmux doctor` needs to report whether the daemon process is alive. Socket responsiveness is the primary check, but a stale socket (daemon crashed) is indistinguishable from a slow daemon without PID information.
+
+### Decision
+
+Daemon writes its PID to `<data_dir>/agentmux.pid` on start. Removes it on clean shutdown. Doctor reads the PID file and uses `kill(pid, 0)` to check process liveness.
+
+### PID alive detection
+
+- `kill(pid, 0) == 0` → process exists, we can signal it → **alive**
+- `errno == EPERM` → process exists but we lack permission → **alive**
+- `errno == ESRCH` → no such process → **not alive**
+
+### Stale PID handling
+
+Doctor detects stale PID files (PID exists but process is dead) and **auto-removes** them. This prevents stale PID accumulation from repeated daemon crashes.
+
+### Rationale
+
+- PID file is best-effort (warns on write/remove failure, never crashes daemon)
+- `EPERM` case handles containerized environments where PID 1 may be owned by root
+- Auto-cleanup in doctor prevents manual intervention
+
+### Alternatives considered
+
+- **No PID file**: Can't distinguish "daemon slow" from "daemon dead with stale socket"
+- **PID in socket metadata**: Would require a successful socket connection (defeats the purpose — if we can connect, daemon is alive)
+- **procfs inspection** (`/proc/<pid>/cmdline`): Linux-only, more fragile than `kill(0)`
+
+---
+
+## ADR-013: workspace restart-failed dual-path strategy
+
+**Date:** 2026-06-14
+**Status:** Accepted
+
+### Context
+
+`workspace restart-failed` originally sent `RestartSession` for all unhealthy sessions. But `RestartSession` requires existing session metadata in the daemon registry. Missing sessions (never started, or removed after kill) would fail with "Session not found".
+
+### Decision
+
+Split the restart logic into two paths based on session presence in the daemon:
+
+- **Session exists in daemon but exited/failed** → `RestartSession` (reuse stored metadata: command, args, cwd, profile)
+- **Session not in daemon at all (missing)** → `SpawnSession` (fresh spawn from workspace config)
+
+### Classification
+
+| Daemon state | Action | Request |
+|---|---|---|
+| running / attached / detached | SKIPPED | none |
+| exited / failed | RESTARTED | `RestartSession` |
+| not in daemon | STARTED | `SpawnSession` |
+| command not found | FAILED | none |
+
+### Summary output
+
+Reports four counts: `started`, `restarted`, `skipped`, `failed`.
+
+### Rationale
+
+- `RestartSession` preserves original metadata even if workspace config changed since spawn
+- `SpawnSession` for missing sessions avoids "not found" errors
+- User sees clear distinction between "started fresh" vs "restarted from existing"
+
+### Alternatives considered
+
+- **Always SpawnSession**: Loses session metadata for exited sessions; duplicates session entries
+- **Always RestartSession**: Fails for missing sessions
+- **Remove then spawn**: Unnecessary churn — restart is cleaner for existing sessions
