@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest a new feature or behavior change
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      content: |
+        Describe the feature you'd like. Keep it concrete: what should the user be able to do, and why?
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      placeholder: |
+        What are you trying to do that you can't today? Be specific about the workflow, not just the desired flag/option.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      placeholder: |
+        What command/flag/option are you imagining? Sketch the user-facing shape.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: |
+        What other approaches did you consider? What did you reject and why?
+    validations:
+      required: false
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and impact
+      placeholder: |
+        Backwards-compatible? New dependency? CLI surface change? Daemon protocol change?
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+    validations:
+      required: false

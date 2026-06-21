@@ -3,6 +3,14 @@ name = "agentmux"
 version = "0.1.0-alpha"
 edition = "2021"
 description = "Lightweight Rust terminal session manager for running multiple AI coding agents in parallel"
+license = "MIT"
+repository = "https://github.com/ther12k/agentmux"
+homepage = "https://github.com/ther12k/agentmux"
+readme = "README.md"
+keywords = ["pty", "multiplexer", "ai-agents", "claude", "terminal"]
+categories = ["command-line-utilities", "development-tools"]
+authors = ["Rizky Zulkarnaen"]
+exclude = ["/.github", "/docs/adr.md", "/.claude", "PRD.md", "step.md", "/.gitignore", "/target"]
 
 [lib]
 name = "agentmux"

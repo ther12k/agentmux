@@ -1,8 +1,46 @@
-# AgentMux
+<p align="center">
+  <strong>AgentMux</strong> — terminal multiplexer for parallel AI coding-agent sessions
+</p>
 
-Terminal multiplexer for managing multiple AI coding-agent sessions. Spawn, attach, send text, and tail logs for agents like `pi`, `codex`, `gemini`, `glm`, `aider`, `opencode`, and more — all from a single CLI.
+<p align="center">
+  <a href="https://github.com/ther12k/agentmux/actions/workflows/ci.yml"><img src="https://github.com/ther12k/agentmux/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/ther12k/agentmux/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
+  <a href="https://github.com/ther12k/agentmux/releases"><img src="https://img.shields.io/github/v/release/ther12k/agentmux.svg" alt="latest release" /></a>
+</p>
+
+## What it does
+
+AgentMux spawns, attaches, sends text to, and tails logs for multiple AI coding-agent sessions
+(`pi`, `codex`, `gemini`, `glm`, `aider`, `opencode`, plus a generic `shell`) from a single CLI.
+Built for developers who run several agents in parallel and want a workflow layer over them.
+
+```bash
+agentmux workspace start                       # spawn all agents from .agentmux.toml
+agentmux send codex-ui "refactor auth" --enter # type into a session without attaching
+agentmux logs glm-review --tail 50            # see what an agent is doing
+agentmux kill pi-main                          # tear down
+```
 
 The daemon auto-starts on first command. No manual `agentmux daemon` needed.
+
+## Why agentmux vs tmux / claude-squad / jmux / agent-deck / kmux
+
+| Tool | Focus | Scripted `send` | First-class logs | Lightweight daemon |
+|---|---|---|---|---|
+| tmux / zellij | General-purpose window multiplexer | via `send-keys` | via `capture-pane` | foreground only |
+| [claude-squad](https://github.com/smtg-ai/claude-squad) | Multi-agent dashboard with web UI | yes | partial | heavier (Go) |
+| [jmux](https://github.com/jarredkenny/jmux) | tmux wrapper for agents | manual | wraps tmux | wraps tmux |
+| [agent-deck](https://github.com/asheshgoplani/agent-deck) | TUI session manager | no | TUI-only | TUI only |
+| [kmux](https://github.com/kkd927/kmux) | Modern TMUX fork for AI era | yes | yes | tmux-based |
+| **agentmux** | CLI-first workflow layer | **first-class** | **first-class** | **yes (~100KB)** |
+
+**Pick agentmux when** you want to send prompts to agents from another shell or a CI step,
+or tail logs without attaching, or run a single small binary with no Python/web dependency.
+
+**Pick something else when** you want a web dashboard (claude-squad), split panes (tmux/kmux),
+or a single TUI window with tabs (agent-deck).
+
+See [Comparison](#comparison) below for the full feature matrix.
 
 ---
 
@@ -383,6 +421,37 @@ src/
 
 ---
 
+## Comparison
+
+### Tool focus
+
+| Tool | What it does | When to use it |
+|---|---|---|
+| tmux / zellij | General-purpose terminal multiplexer (windows, panes, sessions) | You want a window manager for any terminal work, not just AI agents |
+| [claude-squad](https://github.com/smtg-ai/claude-squad) | Multi-agent CLI orchestrator with web UI (Go) | You want a full agent-management app with browser dashboard |
+| [jmux](https://github.com/jarredkenny/jmux) | tmux-based parallel agent runner | You already know tmux and want a thin agent-aware layer over it |
+| [agent-deck](https://github.com/asheshgoplani/agent-deck) | TUI session manager for AI agents | You want a single TUI window with tabbed agent sessions |
+| [kmux](https://github.com/kkd927/kmux) | Modern TMUX fork for the AI era | You want tmux-style keybindings with first-class agent support |
+| **agentmux** | CLI-first workflow layer: spawn, send, tail, kill from one binary | You want scripted/orchestrated access to multiple agents from other shells or CI |
+
+### Feature matrix (snapshot 2026-06-21)
+
+| Feature | agentmux | claude-squad | tmux |
+|---|---|---|---|
+| Spawn PTY-backed session | ✓ | ✓ | ✓ |
+| Attach/detach from session | ✓ | ✓ | ✓ |
+| Send text to session stdin | ✓ (scriptable) | ✓ (scriptable) | ✓ (via `send-keys`) |
+| Tail session output | ✓ | partial | ✓ (via `capture-pane`) |
+| Auto-rotate session logs | ✓ (10MB × 3) | varies | ✗ (manual) |
+| Web UI | ✗ (intentional) | ✓ | ✗ |
+| Split panes | ✗ (intentional) | partial | ✓ |
+| Multi-host / remote agents | ✗ | partial | ✓ |
+| Cross-platform (Windows) | ✗ (Linux/macOS only) | partial | ✓ (via WSL/Cygwin) |
+
+This matrix is a snapshot. Verify before relying on specifics.
+
+---
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
