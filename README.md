@@ -27,17 +27,23 @@ The daemon auto-starts on first command. No manual `agentmux daemon` needed.
 
 A typical session, recorded with [asciinema](https://asciinema.org/):
 
-```bash
-# Watch the demo locally (requires asciinema)
-asciinema play https://github.com/ther12k/agentmux/raw/main/demo.cast
+> **Watch the recording:** https://asciinema.org/a/34oknHZN86n9FqCt
+>
+> *(Asciinema.org recordings from unlinked CLIs auto-delete after 7 days. To keep it permanent, open https://asciinema.org/connect/f5cb61e3-514c-4fd4-af14-20f7525a3746 in a browser to link this CLI to an asciinema.org account, then re-upload.)*
 
-# Or embed it in your own README:
-<script src="https://asciinema.org/a/XXXXX.js" id="asciicast-XXXXX" async></script>
+Run it yourself from the local file:
+
+```bash
+asciinema play https://github.com/ther12k/agentmux/raw/main/demo.cast
 ```
 
 The recording uses fake agent binaries (`pi`, `codex`, `glm` stubs that echo input back) so you don't need real coding-agent CLIs installed to see the workflow.
 
-> Want to upload the cast to asciinema.org for hosted playback? Run `asciinema upload demo.cast` from this repo and paste the resulting URL in place of the XXXXX above.
+Want to host the recording yourself? Embed it in your own README:
+
+```html
+<script src="https://asciinema.org/a/34oknHZN86n9FqCt.js" id="asciicast-34oknHZN86n9FqCt" async></script>
+```
 
 ## Why agentmux vs tmux / claude-squad / jmux / agent-deck / kmux
 
