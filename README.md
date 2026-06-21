@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/ther12k/agentmux/actions/workflows/ci.yml"><img src="https://github.com/ther12k/agentmux/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/ther12k/agentmux/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
+  <a href="https://github.com/ther12k/agentmux/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <a href="https://github.com/ther12k/agentmux/releases"><img src="https://img.shields.io/github/v/release/ther12k/agentmux.svg" alt="latest release" /></a>
 </p>
 
