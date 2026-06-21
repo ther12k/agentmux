@@ -23,6 +23,22 @@ agentmux kill pi-main                          # tear down
 
 The daemon auto-starts on first command. No manual `agentmux daemon` needed.
 
+### Demo (31s)
+
+A typical session, recorded with [asciinema](https://asciinema.org/):
+
+```bash
+# Watch the demo locally (requires asciinema)
+asciinema play https://github.com/ther12k/agentmux/raw/main/demo.cast
+
+# Or embed it in your own README:
+<script src="https://asciinema.org/a/XXXXX.js" id="asciicast-XXXXX" async></script>
+```
+
+The recording uses fake agent binaries (`pi`, `codex`, `glm` stubs that echo input back) so you don't need real coding-agent CLIs installed to see the workflow.
+
+> Want to upload the cast to asciinema.org for hosted playback? Run `asciinema upload demo.cast` from this repo and paste the resulting URL in place of the XXXXX above.
+
 ## Why agentmux vs tmux / claude-squad / jmux / agent-deck / kmux
 
 | Tool | Focus | Scripted `send` | First-class logs | Lightweight daemon |
